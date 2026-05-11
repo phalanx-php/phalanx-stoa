@@ -6,6 +6,7 @@ namespace Phalanx\Tests\Stoa\Integration;
 
 use Phalanx\Application;
 use Phalanx\Stoa\RouteGroup;
+use Phalanx\Stoa\RouteNotFoundException;
 use Phalanx\Stoa\ValidationException;
 use Phalanx\Stoa\Validator\Param\IntInRange;
 use Phalanx\Stoa\Validator\Param\OneOf;
@@ -24,16 +25,6 @@ final class ParamValidatorDispatchTest extends TestCase
 {
     private Application $app;
 
-    protected function setUp(): void
-    {
-        $this->app = Application::starting()->compile();
-    }
-
-    protected function tearDown(): void
-    {
-        $this->app->shutdown();
-    }
-
     #[Test]
     public function param_validator_passes_for_valid_value(): void
     {
@@ -47,6 +38,21 @@ final class ParamValidatorDispatchTest extends TestCase
         $result = $scope->execute($group);
 
         $this->assertSame('42', $result);
+    }
+
+    #[Test]
+    public function param_validator_pattern_rejects_invalid_shape_before_dispatch(): void
+    {
+        $group = RouteGroup::of([
+            'GET /items/{id}' => ShowRouteId::class,
+        ])->withPatterns(['id' => new IntInRange(1, 999)]);
+
+        $request = $this->createRequest('GET', '/items/abc');
+        $scope = $this->app->createScope()->withAttribute('request', $request);
+
+        $this->expectException(RouteNotFoundException::class);
+
+        $scope->execute($group);
     }
 
     #[Test]
@@ -104,12 +110,22 @@ final class ParamValidatorDispatchTest extends TestCase
         $this->assertSame('bar', $result);
     }
 
+    protected function setUp(): void
+    {
+        $this->app = Application::starting()->compile();
+    }
+
+    protected function tearDown(): void
+    {
+        $this->app->shutdown();
+    }
+
     private function createRequest(string $method, string $path): ServerRequestInterface
     {
-        $uri = $this->createMock(UriInterface::class);
+        $uri = $this->createStub(UriInterface::class);
         $uri->method('getPath')->willReturn($path);
 
-        $request = $this->createMock(ServerRequestInterface::class);
+        $request = $this->createStub(ServerRequestInterface::class);
         $request->method('getMethod')->willReturn($method);
         $request->method('getUri')->willReturn($uri);
         $request->method('getQueryParams')->willReturn([]);

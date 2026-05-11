@@ -5,13 +5,17 @@ declare(strict_types=1);
 namespace Phalanx\Stoa;
 
 use Phalanx\Auth\AuthContext;
-use Phalanx\ExecutionScope;
+use Phalanx\Scope\ExecutionScope;
 use Phalanx\Support\ExecutionScopeDelegate;
 use Psr\Http\Message\ServerRequestInterface;
 
 class AuthExecutionContext implements AuthRequestScope
 {
     use ExecutionScopeDelegate;
+
+    public string $resourceId {
+        get => $this->inner->resourceId;
+    }
 
     public ServerRequestInterface $request {
         get => $this->inner->request;
@@ -61,6 +65,11 @@ class AuthExecutionContext implements AuthRequestScope
     public function isJson(): bool
     {
         return $this->inner->isJson();
+    }
+
+    public function acceptsHtml(): bool
+    {
+        return $this->inner->acceptsHtml();
     }
 
     public function bearerToken(): ?string

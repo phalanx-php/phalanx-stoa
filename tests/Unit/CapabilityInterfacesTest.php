@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Phalanx\Tests\Stoa\Unit;
 
+use GuzzleHttp\Psr7\Response;
 use Phalanx\HasMiddleware;
 use Phalanx\Stoa\Contract\HasValidators;
 use Phalanx\Stoa\Contract\Header;
@@ -29,7 +30,7 @@ final class CapabilityInterfacesTest extends TestCase
                     201 => \stdClass::class,
                     409 => \RuntimeException::class,
                 ];
-            }
+                }
         };
 
         $this->assertSame(
@@ -41,10 +42,10 @@ final class CapabilityInterfacesTest extends TestCase
     #[Test]
     public function responds_satisfies_interface_with_backed_property(): void
     {
-        // Preferred form: backed property with public private(set), no hook ceremony.
+        // Preferred form: backed property with private(set), no hook ceremony.
         $handler = new class implements Responds {
             /** @var array<int, class-string> */
-            public private(set) array $responseTypes = [
+            private(set) array $responseTypes = [
                 201 => \stdClass::class,
                 409 => \RuntimeException::class,
             ];
@@ -92,7 +93,7 @@ final class CapabilityInterfacesTest extends TestCase
                     Header::required('X-Api-Version', pattern: 'v\d+'),
                     Header::optional('X-Trace-Id'),
                 ];
-            }
+                }
         };
 
         $this->assertCount(2, $handler->requiredHeaders);
@@ -151,7 +152,7 @@ final class CapabilityInterfacesTest extends TestCase
 
             public function toResponse(): \Psr\Http\Message\ResponseInterface
             {
-                return new \React\Http\Message\Response($this->status);
+                return new Response($this->status);
             }
         };
 

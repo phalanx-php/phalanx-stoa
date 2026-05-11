@@ -4,251 +4,262 @@ declare(strict_types=1);
 
 namespace Phalanx\Tests\Stoa\Integration;
 
+use GuzzleHttp\Psr7\ServerRequest;
 use Phalanx\Application;
-use Phalanx\AppHost;
-use Phalanx\Stoa\RouteGroup;
-use Phalanx\Stoa\Runner;
+use Phalanx\Boot\AppContext;
+use Phalanx\Cancellation\Cancelled;
+use Phalanx\Scope\ExecutionScope;
 use Phalanx\Service\ServiceBundle;
 use Phalanx\Service\Services;
-use Phalanx\Tests\Stoa\Fixtures\EventTrackingSlowHandler;
-use Phalanx\Tests\Stoa\Fixtures\SlowHandler;
-use Phalanx\Tests\Stoa\Fixtures\StuckHandler;
+use Phalanx\Stoa\RequestScope;
+use Phalanx\Stoa\RouteGroup;
+use Phalanx\Stoa\Runtime\Identity\StoaEventSid;
+use Phalanx\Stoa\StoaRunner;
+use Phalanx\Stoa\StoaServerConfig;
+use Phalanx\Styx\Channel;
+use Phalanx\Task\Scopeable;
+use Phalanx\Testing\PhalanxTestCase;
 use Phalanx\Tests\Stoa\Fixtures\Routes\StatusOk;
 use PHPUnit\Framework\Attributes\Test;
-use PHPUnit\Framework\TestCase;
-use React\EventLoop\Loop;
-use React\Http\Browser;
-use React\Socket\SocketServer;
+use Psr\Http\Message\ResponseInterface;
 
-final class GracefulDrainTest extends TestCase
+final class GracefulDrainTest extends PhalanxTestCase
 {
-    private const string HOST = '127.0.0.1';
-
     #[Test]
-    public function inflight_request_completes_within_drain_timeout(): void
+    public function inflightRequestCompletesWithinDrainTimeout(): void
     {
-        $port = self::findFreePort();
-        $responseBody = null;
-        $responseStatus = null;
+        $this->scope->run(static function (ExecutionScope $scope): void {
+            DrainCompletingHandler::$entered = new Channel();
+            $app = Application::starting()->compile()->startup();
+            $runner = StoaRunner::from($app, new StoaServerConfig(requestTimeout: 5.0, drainTimeout: 2.0))
+                ->withRoutes(RouteGroup::of([
+                    'GET /slow' => DrainCompletingHandler::class,
+                ]));
 
-        $app = Application::starting()->compile();
-        $runner = Runner::from($app, requestTimeout: 5.0, drainTimeout: 2.0);
-        $runner->withRoutes(RouteGroup::of([
-            'GET /slow' => SlowHandler::class,
-        ]));
+            $results = $scope->concurrent(
+                static fn(): ResponseInterface => $runner->dispatch(new ServerRequest('GET', '/slow')),
+                static function (ExecutionScope $control) use ($runner): null {
+                    self::readSignal(DrainCompletingHandler::$entered);
+                    self::assertSame(1, $runner->activeRequests());
+                    $runner->stop();
 
-        Loop::futureTick(static function () use ($runner, $port, &$responseBody, &$responseStatus): void {
-            $browser = new Browser();
-            $url = sprintf('http://%s:%d/slow', self::HOST, $port);
-
-            $browser->get($url)->then(
-                static function ($response) use (&$responseBody, &$responseStatus): void {
-                    $responseStatus = $response->getStatusCode();
-                    $responseBody = (string) $response->getBody();
+                    return null;
                 },
             );
 
-            Loop::addTimer(0.1, static function () use ($runner): void {
-                $runner->stop();
+            $response = $results[0];
+            self::assertInstanceOf(ResponseInterface::class, $response);
+            self::assertSame(200, $response->getStatusCode());
+            self::assertStringContainsString('completed', (string) $response->getBody());
+            self::assertSame(0, $runner->activeRequests());
+        });
+    }
+
+    #[Test]
+    public function drainTimeoutCancelsStuckRequest(): void
+    {
+        $this->scope->run(static function (ExecutionScope $scope): void {
+            DrainStuckHandler::$cancelled = false;
+            DrainStuckHandler::$resourceId = '';
+            DrainStuckHandler::$entered = new Channel();
+            $app = Application::starting()->compile()->startup();
+            $events = [];
+            $app->runtime()->memory->events->listen(static function ($event) use (&$events): void {
+                $events[] = $event;
             });
-        });
+            $runner = StoaRunner::from($app, new StoaServerConfig(requestTimeout: 10.0, drainTimeout: 0.05))
+                ->withRoutes(RouteGroup::of([
+                    'GET /stuck' => DrainStuckHandler::class,
+                ]));
 
-        self::addSafetyTimeout(4.0);
-        $runner->run(self::HOST . ':' . $port);
+            $start = hrtime(true);
+            $results = $scope->settle(
+                request: static fn(): ResponseInterface => $runner->dispatch(new ServerRequest('GET', '/stuck')),
+                control: static function (ExecutionScope $control) use ($runner, &$start): null {
+                    self::readSignal(DrainStuckHandler::$entered);
+                    self::assertSame(1, $runner->activeRequests());
+                    $start = hrtime(true);
+                    $runner->stop();
 
-        $this->assertSame(200, $responseStatus);
-        $this->assertStringContainsString('completed', $responseBody ?? '');
-    }
+                    return null;
+                },
+            );
 
-    #[Test]
-    public function drain_timeout_forces_shutdown_on_stuck_request(): void
-    {
-        $port = self::findFreePort();
-        $startTime = null;
+            $elapsed = (hrtime(true) - $start) / 1e9;
 
-        $app = Application::starting()->compile();
-        $runner = Runner::from($app, requestTimeout: 10.0, drainTimeout: 0.3);
-        $runner->withRoutes(RouteGroup::of([
-            'GET /stuck' => StuckHandler::class,
-        ]));
-
-        Loop::futureTick(static function () use ($runner, $port, &$startTime): void {
-            $browser = new Browser();
-            $url = sprintf('http://%s:%d/stuck', self::HOST, $port);
-
-            $browser->get($url)->then(null, static function (): void {});
-
-            Loop::addTimer(0.1, static function () use ($runner, &$startTime): void {
-                $startTime = hrtime(true);
-                $runner->stop();
-            });
-        });
-
-        self::addSafetyTimeout(3.0);
-        $runner->run(self::HOST . ':' . $port);
-
-        $this->assertNotNull($startTime);
-        $elapsed = (hrtime(true) - $startTime) / 1e9;
-        $this->assertLessThan(1.0, $elapsed, 'Drain timeout should force shutdown within ~0.3s');
-    }
-
-    #[Test]
-    public function immediate_finalization_when_no_active_requests(): void
-    {
-        $port = self::findFreePort();
-        $startTime = null;
-
-        $app = Application::starting()->compile();
-        $runner = Runner::from($app, requestTimeout: 5.0, drainTimeout: 5.0);
-        $runner->withRoutes(RouteGroup::of([
-            'GET /health' => StatusOk::class,
-        ]));
-
-        Loop::futureTick(static function () use ($runner, &$startTime): void {
-            $startTime = hrtime(true);
-            $runner->stop();
-        });
-
-        self::addSafetyTimeout(2.0);
-        $runner->run(self::HOST . ':' . $port);
-
-        $elapsed = (hrtime(true) - $startTime) / 1e9;
-        $this->assertLessThan(0.1, $elapsed, 'Should finalize immediately with zero in-flight requests');
-    }
-
-    #[Test]
-    public function multiple_concurrent_requests_all_drain(): void
-    {
-        $port = self::findFreePort();
-        $completed = 0;
-
-        $app = Application::starting()->compile();
-        $runner = Runner::from($app, requestTimeout: 5.0, drainTimeout: 2.0);
-        $runner->withRoutes(RouteGroup::of([
-            'GET /slow' => SlowHandler::class,
-        ]));
-
-        Loop::futureTick(static function () use ($runner, $port, &$completed): void {
-            $browser = new Browser();
-            $url = sprintf('http://%s:%d/slow', self::HOST, $port);
-
-            for ($i = 0; $i < 5; $i++) {
-                $browser->get($url)->then(
-                    static function () use (&$completed): void {
-                        ++$completed;
-                    },
-                );
+            self::assertTrue($results->isOk('control'));
+            if ($results->isOk('request')) {
+                $response = $results->get('request');
+                self::assertInstanceOf(ResponseInterface::class, $response);
+                self::assertSame(500, $response->getStatusCode());
+            } else {
+                self::assertInstanceOf(Cancelled::class, $results->errors['request']);
             }
-
-            Loop::addTimer(0.05, static function () use ($runner): void {
-                $runner->stop();
-            });
+            self::assertLessThan(0.5, $elapsed, 'Drain timeout should cancel stuck request quickly');
+            self::assertTrue(DrainStuckHandler::$cancelled);
+            self::assertNotSame('', DrainStuckHandler::$resourceId);
+            self::assertContains(
+                StoaEventSid::RequestAborted->value(),
+                self::eventTypesForResource($events, DrainStuckHandler::$resourceId),
+            );
+            self::assertNotContains(
+                StoaEventSid::RequestFailed->value(),
+                self::eventTypesForResource($events, DrainStuckHandler::$resourceId),
+            );
+            self::assertSame(0, $runner->activeRequests());
         });
-
-        self::addSafetyTimeout(4.0);
-        $runner->run(self::HOST . ':' . $port);
-
-        $this->assertSame(5, $completed, 'All 5 concurrent requests should complete during drain');
     }
 
     #[Test]
-    public function service_shutdown_hooks_fire_after_drain(): void
+    public function newRequestsAreRejectedWhileDraining(): void
     {
-        $shutdownFired = false;
+        $this->scope->run(static function (ExecutionScope $scope): void {
+            DrainCompletingHandler::$entered = new Channel();
+            $app = Application::starting()->compile()->startup();
+            $runner = StoaRunner::from($app, new StoaServerConfig(requestTimeout: 5.0, drainTimeout: 2.0))
+                ->withRoutes(RouteGroup::of([
+                    'GET /slow' => DrainCompletingHandler::class,
+                    'GET /health' => StatusOk::class,
+                ]));
 
-        $bundle = new class($shutdownFired) implements ServiceBundle {
-            public function __construct(private bool &$shutdownFired) {}
+            $results = $scope->concurrent(
+                static fn(): ResponseInterface => $runner->dispatch(new ServerRequest('GET', '/slow')),
+                static function (ExecutionScope $control) use ($runner): ResponseInterface {
+                    self::readSignal(DrainCompletingHandler::$entered);
+                    $runner->stop();
 
-            public function services(Services $services, array $context): void
-            {
-                $fired = &$this->shutdownFired;
-                $services->eager(\stdClass::class)
-                    ->factory(static function () {
-                        return new \stdClass();
-                    })
-                    ->onShutdown(static function () use (&$fired): void {
-                        $fired = true;
-                    });
+                    return $runner->dispatch(new ServerRequest('GET', '/health'));
+                },
+            );
+
+            $completed = $results[0];
+            $rejected = $results[1];
+            self::assertInstanceOf(ResponseInterface::class, $completed);
+            self::assertInstanceOf(ResponseInterface::class, $rejected);
+            self::assertSame(503, $rejected->getStatusCode());
+            self::assertSame(200, $completed->getStatusCode());
+        });
+    }
+
+    #[Test]
+    public function serviceShutdownHooksFireAfterDrain(): void
+    {
+        $this->scope->run(static function (ExecutionScope $scope): void {
+            $shutdownFired = false;
+            $bundle = new class ($shutdownFired) extends ServiceBundle {
+                public function __construct(private bool &$shutdownFired)
+                {
+                }
+
+                public function services(Services $services, AppContext $context): void
+                {
+                    $fired = &$this->shutdownFired;
+                    $services->eager(\stdClass::class)
+                        ->factory(static fn(): \stdClass => new \stdClass())
+                        ->onShutdown(static function () use (&$fired): void {
+                            $fired = true;
+                        });
+                }
+            };
+
+            DrainEventTrackingHandler::$entered = new Channel();
+            DrainEventTrackingHandler::$events = [];
+
+            $app = Application::starting()->providers($bundle)->compile()->startup();
+            $runner = StoaRunner::from($app, new StoaServerConfig(requestTimeout: 5.0, drainTimeout: 2.0))
+                ->withRoutes(RouteGroup::of([
+                    'GET /slow' => DrainEventTrackingHandler::class,
+                ]));
+
+            $scope->concurrent(
+                static fn(): ResponseInterface => $runner->dispatch(new ServerRequest('GET', '/slow')),
+                static function (ExecutionScope $control) use ($runner): null {
+                    self::readSignal(DrainEventTrackingHandler::$entered);
+                    $runner->stop();
+
+                    return null;
+                },
+            );
+
+            self::assertContains('handler:complete', DrainEventTrackingHandler::$events);
+            self::assertTrue($shutdownFired, 'Service shutdown hook should have fired');
+        });
+    }
+
+    /**
+     * @param list<\Phalanx\Runtime\Memory\RuntimeLifecycleEvent> $events
+     * @return list<string>
+     */
+    private static function eventTypesForResource(array $events, string $resourceId): array
+    {
+        $types = [];
+        foreach ($events as $event) {
+            if ($event->resourceId === $resourceId) {
+                $types[] = $event->type;
             }
-        };
+        }
 
-        EventTrackingSlowHandler::$events = [];
-
-        $app = Application::starting()->providers($bundle)->compile();
-        $port = self::findFreePort();
-
-        $runner = Runner::from($app, requestTimeout: 5.0, drainTimeout: 2.0);
-        $runner->withRoutes(RouteGroup::of([
-            'GET /slow' => EventTrackingSlowHandler::class,
-        ]));
-
-        Loop::futureTick(static function () use ($runner, $port): void {
-            $browser = new Browser();
-            $url = sprintf('http://%s:%d/slow', self::HOST, $port);
-
-            $browser->get($url);
-
-            Loop::addTimer(0.1, static function () use ($runner): void {
-                $runner->stop();
-            });
-        });
-
-        self::addSafetyTimeout(4.0);
-        $runner->run(self::HOST . ':' . $port);
-
-        $this->assertContains('handler:complete', EventTrackingSlowHandler::$events);
-        $this->assertTrue($shutdownFired, 'Service shutdown hook should have fired');
+        return $types;
     }
 
-    #[Test]
-    public function new_connections_refused_after_shutdown(): void
+    private static function readSignal(Channel $channel): mixed
     {
-        $port = self::findFreePort();
-        $connectionRefused = false;
+        foreach ($channel->consume() as $value) {
+            return $value;
+        }
 
-        $app = Application::starting()->compile();
-        $runner = Runner::from($app, requestTimeout: 5.0, drainTimeout: 0.5);
-        $runner->withRoutes(RouteGroup::of([
-            'GET /health' => StatusOk::class,
-        ]));
-
-        Loop::futureTick(static function () use ($runner, $port, &$connectionRefused): void {
-            $runner->stop();
-
-            Loop::addTimer(0.01, static function () use ($port, &$connectionRefused): void {
-                $browser = new Browser();
-                $url = sprintf('http://%s:%d/health', self::HOST, $port);
-
-                $browser->get($url)->then(
-                    static function (): void {},
-                    static function () use (&$connectionRefused): void {
-                        $connectionRefused = true;
-                    },
-                );
-            });
-        });
-
-        self::addSafetyTimeout(3.0);
-        $runner->run(self::HOST . ':' . $port);
-
-        $this->assertTrue($connectionRefused, 'Connection should be refused after shutdown');
+        self::fail('Expected drain signal.');
     }
+}
 
-    private static function findFreePort(): int
+final class DrainCompletingHandler implements Scopeable
+{
+    public static Channel $entered;
+
+    public function __invoke(RequestScope $scope): string
     {
-        $socket = new SocketServer(self::HOST . ':0');
-        $address = $socket->getAddress();
-        assert($address !== null);
-        $port = (int) parse_url($address, PHP_URL_PORT);
-        $socket->close();
+        self::$entered->emit(true);
+        $scope->delay(0.3);
 
-        return $port;
+        return 'completed';
     }
+}
 
-    private static function addSafetyTimeout(float $seconds): void
+final class DrainEventTrackingHandler implements Scopeable
+{
+    public static Channel $entered;
+
+    /** @var list<string> */
+    public static array $events = [];
+
+    public function __invoke(RequestScope $scope): string
     {
-        Loop::addTimer($seconds, static function (): void {
-            Loop::stop();
-        });
+        self::$entered->emit(true);
+        $scope->delay(0.3);
+        self::$events[] = 'handler:complete';
+
+        return 'done';
+    }
+}
+
+final class DrainStuckHandler implements Scopeable
+{
+    public static bool $cancelled = false;
+    public static Channel $entered;
+    public static string $resourceId = '';
+
+    public function __invoke(RequestScope $scope): string
+    {
+        self::$resourceId = $scope->resourceId;
+        self::$entered->emit(true);
+
+        try {
+            $scope->delay(1.5);
+        } catch (Cancelled $e) {
+            self::$cancelled = true;
+            throw $e;
+        }
+
+        return 'completed';
     }
 }

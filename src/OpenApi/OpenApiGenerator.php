@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Phalanx\Stoa\OpenApi;
 
+use Phalanx\Cancellation\Cancelled;
 use Phalanx\Stoa\Contract\InputHydrator;
 use Phalanx\Stoa\Contract\InputSource;
 use Phalanx\Stoa\RouteConfig;
@@ -17,7 +18,8 @@ class OpenApiGenerator
         private readonly string $title = 'API',
         private readonly string $version = '1.0.0',
         private readonly ?string $description = null,
-    ) {}
+    ) {
+    }
 
     /** @return array<string, mixed> */
     public function generate(RouteGroup $routes): array
@@ -95,6 +97,60 @@ class OpenApiGenerator
         return $operation;
     }
 
+    /**
+     * @param class-string $handlerClass
+     * @return array<string, mixed>
+     */
+    protected function buildResponses(
+        string $handlerClass,
+        RouteConfig $config,
+        bool $hasInput,
+    ): array {
+        /** @var array<string, mixed> $responses */
+        $responses = [];
+
+        $ref = self::reflectInvokeReturnType($handlerClass);
+
+        if ($ref instanceof ReflectionNamedType) {
+            [$status, $schema] = SchemaReflector::unwrapResponseWrapper($ref);
+        } else {
+            $status = 200;
+            $schema = null;
+        }
+
+        $successResponse = ['description' => self::statusDescription($status)];
+        if ($schema !== null && $status !== 204) {
+            $successResponse['content'] = [
+                'application/json' => ['schema' => $schema],
+            ];
+        }
+
+        $responses[(string) $status] = $successResponse;
+
+        if ($hasInput) {
+            $responses['422'] = [
+                'description' => 'Validation Failed',
+                'content' => [
+                    'application/json' => [
+                        'schema' => [
+                            'type' => 'object',
+                            'properties' => [
+                                'error' => ['type' => 'string'],
+                                'errors' => ['type' => 'object'],
+                            ],
+                        ],
+                    ],
+                ],
+            ];
+        }
+
+        if ($config->paramNames !== []) {
+            $responses['404'] = ['description' => 'Not Found'];
+        }
+
+        return $responses;
+    }
+
     /** @return list<array<string, mixed>> */
     private static function extractPathParams(RouteConfig $config): array
     {
@@ -165,59 +221,6 @@ class OpenApiGenerator
 
     /**
      * @param class-string $handlerClass
-     * @return array<string, mixed>
-     */
-    protected function buildResponses(
-        string $handlerClass,
-        RouteConfig $config,
-        bool $hasInput,
-    ): array {
-        $responses = [];
-
-        $ref = self::reflectInvokeReturnType($handlerClass);
-
-        if ($ref instanceof ReflectionNamedType) {
-            [$status, $schema] = SchemaReflector::unwrapResponseWrapper($ref);
-        } else {
-            $status = 200;
-            $schema = null;
-        }
-
-        $successResponse = ['description' => self::statusDescription($status)];
-        if ($schema !== null && $status !== 204) {
-            $successResponse['content'] = [
-                'application/json' => ['schema' => $schema],
-            ];
-        }
-
-        $responses[(string) $status] = $successResponse;
-
-        if ($hasInput) {
-            $responses['422'] = [
-                'description' => 'Validation Failed',
-                'content' => [
-                    'application/json' => [
-                        'schema' => [
-                            'type' => 'object',
-                            'properties' => [
-                                'error' => ['type' => 'string'],
-                                'errors' => ['type' => 'object'],
-                            ],
-                        ],
-                    ],
-                ],
-            ];
-        }
-
-        if ($config->paramNames !== []) {
-            $responses['404'] = ['description' => 'Not Found'];
-        }
-
-        return $responses; // @phpstan-ignore return.type
-    }
-
-    /**
-     * @param class-string $handlerClass
      */
     private static function reflectInvokeReturnType(string $handlerClass): ?\ReflectionType
     {
@@ -261,6 +264,8 @@ class OpenApiGenerator
                 $instance = $ref->newInstance();
                 $prop = $ref->getProperty($name);
                 return $prop->getValue($instance);
+            } catch (Cancelled $c) {
+                throw $c;
             } catch (\Throwable) {
                 return null;
             }

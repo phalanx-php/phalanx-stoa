@@ -3,7 +3,7 @@
     "description": "HTTP server framework for Phalanx",
     "license": "MIT",
     "type": "library",
-    "keywords": ["http", "server", "routing", "async", "fastroute", "reactphp"],
+    "keywords": ["http", "server", "routing", "async", "fastroute", "openswoole"],
     "authors": [
         {
             "name": "Jonathan Havens",
@@ -13,14 +13,16 @@
     "homepage": "https://github.com/phalanx-php/phalanx-stoa",
     "require": {
         "php": "^8.4",
-        "phalanx-php/aegis": "^0.5",
+        "guzzlehttp/psr7": "^2.0",
         "nikic/fast-route": "^2.0",
-        "react/datagram": "^1.10",
-        "react/http": "^1.10"
+        "openswoole/core": "^26.2",
+        "phalanx-php/aegis": "^0.6"
+    },
+    "require-dev": {
+        "phalanx-php/iris": "^0.6"
     },
     "suggest": {
-        "symfony/runtime": "For Symfony Runtime integration via PhalanxHttpRunner",
-        "phalanx-php/styx": "For streaming responses",
+        "symfony/runtime": "For Symfony Runtime integration via Stoa::starting()",
         "phalanx-php/hydra": "For worker process parallelism in request handlers"
     },
     "autoload": {
@@ -35,7 +37,12 @@
     },
     "extra": {
         "branch-alias": {
-            "dev-main": "0.5-dev"
+            "dev-main": "0.2.x-dev"
+        },
+        "phalanx": {
+            "bundles": [
+                "Phalanx\\Stoa\\Testing\\StoaTestableBundle"
+            ]
         }
     },
     "minimum-stability": "dev",

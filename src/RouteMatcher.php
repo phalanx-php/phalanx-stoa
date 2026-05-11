@@ -4,16 +4,15 @@ declare(strict_types=1);
 
 namespace Phalanx\Stoa;
 
-use Phalanx\ExecutionScope;
 use Phalanx\Handler\Handler;
 use Phalanx\Handler\HandlerMatcher;
 use Phalanx\Handler\MatchResult;
+use Phalanx\Scope\ExecutionScope;
 use Psr\Http\Message\ServerRequestInterface;
 
 final class RouteMatcher implements HandlerMatcher
 {
-    /** @var array<string, FastRouteCompiler> keyed by protocol */
-    private array $compilers = [];
+    private ?FastRouteCompiler $compiler = null;
 
     /** @param array<string, Handler> $handlers */
     public function match(ExecutionScope $scope, array $handlers): ?MatchResult
@@ -27,14 +26,8 @@ final class RouteMatcher implements HandlerMatcher
         $method = $request->getMethod();
         $path = $request->getUri()->getPath();
 
-        $upgradeHeader = (string) $request->getHeaderLine('Upgrade');
-        $connectionHeader = (string) $request->getHeaderLine('Connection');
-        $isWsUpgrade = strtolower($upgradeHeader) === 'websocket'
-            && stripos($connectionHeader, 'upgrade') !== false;
-        $requestProtocol = $isWsUpgrade ? 'ws' : 'http';
-
-        $compiler = $this->getCompiler($handlers, $requestProtocol);
-        $result = $compiler->dispatch($method, $path);
+        $this->compiler ??= new FastRouteCompiler($handlers);
+        $result = $this->compiler->dispatch($method, $path);
 
         $handler = $result['handler'];
         $params = $result['params'];
@@ -46,6 +39,11 @@ final class RouteMatcher implements HandlerMatcher
         }
 
         assert($handler->config instanceof RouteConfig);
+        $resource = StoaRequestResource::fromScope($scope);
+        if ($resource !== null) {
+            $resource->routeMatched($handler->config->path);
+        }
+
         $scope = new ExecutionContext(
             $scope,
             $request,
@@ -57,25 +55,4 @@ final class RouteMatcher implements HandlerMatcher
         return new MatchResult($handler, $scope);
     }
 
-    /**
-     * @param array<string, Handler> $handlers
-     */
-    private function getCompiler(array $handlers, string $protocol): FastRouteCompiler
-    {
-        if (isset($this->compilers[$protocol])) {
-            return $this->compilers[$protocol];
-        }
-
-        $filtered = [];
-        foreach ($handlers as $key => $handler) {
-            if ($handler->config instanceof RouteConfig && $handler->config->protocol === $protocol) {
-                $filtered[$key] = $handler;
-            }
-        }
-
-        $compiler = new FastRouteCompiler($filtered);
-        $this->compilers[$protocol] = $compiler;
-
-        return $compiler;
-    }
 }

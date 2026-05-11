@@ -5,10 +5,10 @@ declare(strict_types=1);
 namespace Phalanx\Stoa;
 
 use Closure;
-use Phalanx\ExecutionScope;
 use Phalanx\Handler\Handler;
 use Phalanx\Handler\HandlerGroup;
 use Phalanx\Handler\HandlerResolver;
+use Phalanx\Scope\ExecutionScope;
 use Phalanx\Stoa\Contract\HasValidators;
 use Phalanx\Stoa\Contract\Header;
 use Phalanx\Stoa\Contract\InputHydrator;
@@ -100,6 +100,122 @@ final class RouteGroup implements Executable
             ->withInvoker(self::httpInvoker());
 
         return $instance;
+    }
+
+    public function __invoke(ExecutionScope $scope): mixed
+    {
+        return ($this->inner)($scope);
+    }
+
+    /** @param array<string, string|RouteParamValidator> $patterns */
+    public function withPatterns(array $patterns): self
+    {
+        $newStringPatterns = [];
+        $newParamValidators = [];
+
+        foreach ($patterns as $alias => $value) {
+            if (is_string($value)) {
+                $newStringPatterns[$alias] = $value;
+            } else {
+                $newParamValidators[$alias] = $value;
+                $regex = $value->toPattern();
+                if ($regex !== null) {
+                    $newStringPatterns[$alias] = $regex;
+                }
+            }
+        }
+
+        $stringPatterns = [...$this->patterns, ...$newStringPatterns];
+        $paramValidators = [...$this->paramValidators, ...$newParamValidators];
+        $inner = $this->inner;
+
+        foreach ($inner->all() as $key => $handler) {
+            if (!$handler->config instanceof RouteConfig) {
+                continue;
+            }
+
+            $inner = $inner->add(
+                $key,
+                new Handler(
+                    $handler->task,
+                    self::compileRouteConfig($handler->config, $stringPatterns, $paramValidators),
+                ),
+            );
+        }
+
+        $clone = self::fromHandlerGroup($inner);
+        $clone->patterns = $stringPatterns;
+        $clone->paramValidators = $paramValidators;
+
+        return $clone;
+    }
+
+    public function merge(self $other): self
+    {
+        $newInner = $this->inner->merge($other->inner);
+
+        $clone = self::fromHandlerGroup($newInner);
+        $clone->patterns = [...$this->patterns, ...$other->patterns];
+        $clone->paramValidators = [...$this->paramValidators, ...$other->paramValidators];
+
+        return $clone;
+    }
+
+    public function mount(string $prefix, self $group): self
+    {
+        $prefix = rtrim($prefix, '/');
+        $mounted = HandlerGroup::create();
+
+        foreach ($group->inner->all() as $key => $handler) {
+            if ($handler->config instanceof RouteConfig) {
+                $newKey = self::prefixRouteKey($prefix, $key);
+                $newConfig = self::prefixRouteConfig($prefix, $handler->config, $group->inner->middleware);
+                $mounted = $mounted->add($newKey, new Handler($handler->task, $newConfig));
+            } else {
+                $mounted = $mounted->add($key, $handler);
+            }
+        }
+
+        $newInner = $this->inner->merge($mounted);
+
+        $clone = self::fromHandlerGroup($newInner);
+        $clone->patterns = [...$this->patterns, ...$group->patterns];
+        $clone->paramValidators = [...$this->paramValidators, ...$group->paramValidators];
+
+        return $clone;
+    }
+
+    /**
+     * Wrap all routes in this group with middleware (outermost layer).
+     *
+     * @param class-string ...$middleware
+     */
+    public function wrap(string ...$middleware): self
+    {
+        $newInner = $this->inner->wrap(...$middleware);
+
+        $clone = self::fromHandlerGroup($newInner);
+        $clone->patterns = $this->patterns;
+        $clone->paramValidators = $this->paramValidators;
+
+        return $clone;
+    }
+
+    /** @return list<string> */
+    public function keys(): array
+    {
+        return $this->inner->keys();
+    }
+
+    public function handlers(): HandlerGroup
+    {
+        return $this->inner;
+    }
+
+    /** @return array<string, Handler> */
+    public function routes(): array
+    {
+        return $this->inner->filterByConfig(RouteConfig::class);
     }
 
     /**
@@ -210,139 +326,6 @@ final class RouteGroup implements Executable
         }
     }
 
-    public function __invoke(ExecutionScope $scope): mixed
-    {
-        return ($this->inner)($scope);
-    }
-
-    /**
-     * Register named pattern aliases for path placeholders.
-     *
-     * Accepts a mix of string patterns (fed to FastRoute at compile time) and
-     * RouteParamValidator instances keyed by PARAM NAME. Validators are
-     * attached to every route in the group whose compiled paramNames include
-     * the given key. Validators that return a non-null toPattern() are used
-     * as both the compile-time regex constraint AND the imperative validator.
-     *
-     * String pattern aliases (e.g. 'int' => '\d+') continue to work as
-     * before and apply to routes added AFTER this call only.
-     *
-     * @param array<string, string|RouteParamValidator> $patterns
-     */
-    public function withPatterns(array $patterns): self
-    {
-        $newStringPatterns = [];
-        $newParamValidators = [];
-
-        foreach ($patterns as $alias => $value) {
-            if (is_string($value)) {
-                $newStringPatterns[$alias] = $value;
-            } else {
-                $newParamValidators[$alias] = $value;
-                $regex = $value->toPattern();
-                if ($regex !== null) {
-                    $newStringPatterns[$alias] = $regex;
-                }
-            }
-        }
-
-        // Attach imperative validators to existing routes whose param names
-        // match. Re-build the inner HandlerGroup preserving all state except
-        // the updated handler entries.
-        $inner = $this->inner;
-        if ($newParamValidators !== []) {
-            foreach ($inner->all() as $key => $handler) {
-                if (!$handler->config instanceof RouteConfig) {
-                    continue;
-                }
-                $matchingValidators = array_intersect_key(
-                    $newParamValidators,
-                    array_flip($handler->config->paramNames),
-                );
-                if ($matchingValidators !== []) {
-                    $newConfig = $handler->config->withParamValidators(
-                        [...$handler->config->paramValidators, ...$matchingValidators]
-                    );
-                    $inner = $inner->add($key, new Handler($handler->task, $newConfig));
-                }
-            }
-        }
-
-        $clone = self::fromHandlerGroup($inner);
-        $clone->patterns = [...$this->patterns, ...$newStringPatterns];
-        $clone->paramValidators = [...$this->paramValidators, ...$newParamValidators];
-
-        return $clone;
-    }
-
-    public function merge(self $other): self
-    {
-        $newInner = $this->inner->merge($other->inner);
-
-        $clone = self::fromHandlerGroup($newInner);
-        $clone->patterns = [...$this->patterns, ...$other->patterns];
-        $clone->paramValidators = [...$this->paramValidators, ...$other->paramValidators];
-
-        return $clone;
-    }
-
-    public function mount(string $prefix, self $group): self
-    {
-        $prefix = rtrim($prefix, '/');
-        $mounted = HandlerGroup::create();
-
-        foreach ($group->inner->all() as $key => $handler) {
-            if ($handler->config instanceof RouteConfig) {
-                $newKey = self::prefixRouteKey($prefix, $key);
-                $newConfig = self::prefixRouteConfig($prefix, $handler->config);
-                $mounted = $mounted->add($newKey, new Handler($handler->task, $newConfig));
-            } else {
-                $mounted = $mounted->add($key, $handler);
-            }
-        }
-
-        $newInner = $this->inner->merge($mounted);
-
-        $clone = self::fromHandlerGroup($newInner);
-        $clone->patterns = [...$this->patterns, ...$group->patterns];
-        $clone->paramValidators = [...$this->paramValidators, ...$group->paramValidators];
-
-        return $clone;
-    }
-
-    /**
-     * Wrap all routes in this group with middleware (outermost layer).
-     *
-     * @param class-string ...$middleware
-     */
-    public function wrap(string ...$middleware): self
-    {
-        $newInner = $this->inner->wrap(...$middleware);
-
-        $clone = self::fromHandlerGroup($newInner);
-        $clone->patterns = $this->patterns;
-        $clone->paramValidators = $this->paramValidators;
-
-        return $clone;
-    }
-
-    /** @return list<string> */
-    public function keys(): array
-    {
-        return $this->inner->keys();
-    }
-
-    public function handlers(): HandlerGroup
-    {
-        return $this->inner;
-    }
-
-    /** @return array<string, Handler> */
-    public function routes(): array
-    {
-        return $this->inner->filterByConfig(RouteConfig::class);
-    }
-
     /**
      * @return array{methods: list<string>, path: string}|null
      */
@@ -369,26 +352,45 @@ final class RouteGroup implements Executable
         return $key;
     }
 
-    private static function prefixRouteConfig(string $prefix, RouteConfig $config): RouteConfig
+    /** @param list<class-string> $middleware */
+    private static function prefixRouteConfig(string $prefix, RouteConfig $config, array $middleware = []): RouteConfig
     {
-        $prefixPattern = preg_quote($prefix, '#');
-        // Pattern format is '#^/path$#'. Strip the '#^' delimiter+anchor (2
-        // chars) from the start and the trailing '#' delimiter (1 char) from
-        // the end, leaving '/path$'. Then prepend a fresh '#^/prefix' and
-        // close with '#' to produce the final '#^/prefix/path$#'.
-        $innerPattern = substr($config->pattern, 2, -1);
-        $newPattern = '#^' . $prefixPattern . $innerPattern . '#';
+        return new RouteConfig(
+            methods: $config->methods,
+            path: $prefix . $config->path,
+            fastRoutePath: $prefix . $config->fastRoutePath,
+            paramNames: $config->paramNames,
+            middleware: [...$middleware, ...$config->middleware],
+            tags: $config->tags,
+            priority: $config->priority,
+            paramValidators: $config->paramValidators,
+        );
+    }
+
+    /**
+     * @param array<string, string> $patterns
+     * @param array<string, RouteParamValidator> $validators
+     */
+    private static function compileRouteConfig(
+        RouteConfig $config,
+        array $patterns,
+        array $validators,
+    ): RouteConfig {
+        $compiled = RouteConfig::compile($config->path, $config->methods, $patterns);
+        $matchingValidators = array_intersect_key(
+            $validators,
+            array_flip($compiled->paramNames),
+        );
 
         return new RouteConfig(
-            $config->methods,
-            $newPattern,
-            $config->paramNames,
-            $config->protocol,
-            $prefix . $config->path,
-            $config->middleware,
-            $config->tags,
-            $config->priority,
-            $config->paramValidators,
+            methods: $compiled->methods,
+            path: $compiled->path,
+            fastRoutePath: $compiled->fastRoutePath,
+            paramNames: $compiled->paramNames,
+            middleware: $config->middleware,
+            tags: $config->tags,
+            priority: $config->priority,
+            paramValidators: [...$config->paramValidators, ...$matchingValidators],
         );
     }
 }

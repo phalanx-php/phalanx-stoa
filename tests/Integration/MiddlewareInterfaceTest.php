@@ -9,7 +9,6 @@ use Phalanx\Application;
 use Phalanx\Stoa\Contract\Middleware;
 use Phalanx\Stoa\RequestScope;
 use Phalanx\Stoa\RouteGroup;
-use Phalanx\Task\Executable;
 use Phalanx\Task\Scopeable;
 use PHPUnit\Framework\Attributes\Test;
 use PHPUnit\Framework\TestCase;
@@ -18,21 +17,11 @@ use Psr\Http\Message\UriInterface;
 
 /**
  * Verifies the typed Middleware interface dispatches correctly and composes in
- * the same order as the legacy Executable-based PrefixingMiddleware fixture.
+ * the same order as the executable PrefixingMiddleware fixture.
  */
 final class MiddlewareInterfaceTest extends TestCase
 {
     private Application $app;
-
-    protected function setUp(): void
-    {
-        $this->app = Application::starting()->compile();
-    }
-
-    protected function tearDown(): void
-    {
-        $this->app->shutdown();
-    }
 
     #[Test]
     public function middleware_interface_wraps_result_in_order(): void
@@ -65,12 +54,22 @@ final class MiddlewareInterfaceTest extends TestCase
         $this->assertSame('aborted', $result);
     }
 
+    protected function setUp(): void
+    {
+        $this->app = Application::starting()->compile();
+    }
+
+    protected function tearDown(): void
+    {
+        $this->app->shutdown();
+    }
+
     private function createRequest(string $method, string $path): ServerRequestInterface
     {
-        $uri = $this->createMock(UriInterface::class);
+        $uri = $this->createStub(UriInterface::class);
         $uri->method('getPath')->willReturn($path);
 
-        $request = $this->createMock(ServerRequestInterface::class);
+        $request = $this->createStub(ServerRequestInterface::class);
         $request->method('getMethod')->willReturn($method);
         $request->method('getUri')->willReturn($uri);
         $request->method('getQueryParams')->willReturn([]);
@@ -93,45 +92,24 @@ final class PrefixingMiddlewareV2Handler implements Scopeable
 /**
  * Middleware implementing the typed Middleware interface. Wraps the inner
  * result with "before:" prefix and ":after" suffix. Composition order matches
- * the legacy PrefixingMiddleware test fixture.
+ * the executable PrefixingMiddleware test fixture.
  */
-final class PrefixingMiddlewareV2 implements Middleware, Executable
+final class PrefixingMiddlewareV2 implements Middleware
 {
-    public function handle(RequestScope $scope, Closure $next): mixed
+    public function __invoke(RequestScope $scope, Closure $next): mixed
     {
         $inner = $next($scope);
         return 'before:' . $inner . ':after';
-    }
-
-    public function __invoke(RequestScope $scope): mixed
-    {
-        /** @var Scopeable|Executable $next */
-        $next = $scope->attribute('handler.next');
-
-        return $this->handle(
-            $scope,
-            static function (RequestScope $s) use ($next): mixed {
-                return $next($s);
-            },
-        );
     }
 }
 
 /**
  * Middleware that short-circuits the chain without calling $next.
  */
-final class AbortingMiddlewareV2 implements Middleware, Executable
+final class AbortingMiddlewareV2 implements Middleware
 {
-    public function handle(RequestScope $scope, Closure $next): mixed
+    public function __invoke(RequestScope $scope, Closure $next): mixed
     {
         return 'aborted';
-    }
-
-    public function __invoke(RequestScope $scope): mixed
-    {
-        return $this->handle(
-            $scope,
-            static fn(RequestScope $s): mixed => null,
-        );
     }
 }

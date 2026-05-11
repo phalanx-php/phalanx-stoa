@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Phalanx\Tests\Stoa\Integration;
 
 use Phalanx\Stoa\RequestBody;
+use Phalanx\Stoa\ValidationException;
 use PHPUnit\Framework\Attributes\Test;
 use PHPUnit\Framework\TestCase;
 use Psr\Http\Message\ServerRequestInterface;
@@ -70,16 +71,20 @@ final class RequestBodyTest extends TestCase
 
         $this->assertSame(1, $body->required('a'));
 
-        $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Missing required body parameter: b');
-        $body->required('b');
+        try {
+            $body->required('b');
+            $this->fail('Expected ValidationException');
+        } catch (ValidationException $e) {
+            $this->assertArrayHasKey('b', $e->errors);
+            $this->assertSame(['Missing required body parameter: b'], $e->errors['b']);
+        }
     }
 
     #[Test]
     public function all_returns_full_parsed_body(): void
     {
         $data = ['x' => 1, 'y' => 2];
-        $body = $this->createBody(json_encode($data));
+        $body = $this->createBody(json_encode($data, JSON_THROW_ON_ERROR));
 
         $this->assertSame($data, $body->all());
     }
@@ -125,10 +130,10 @@ final class RequestBodyTest extends TestCase
 
     private function createBody(string $content): RequestBody
     {
-        $stream = $this->createMock(StreamInterface::class);
+        $stream = $this->createStub(StreamInterface::class);
         $stream->method('__toString')->willReturn($content);
 
-        $request = $this->createMock(ServerRequestInterface::class);
+        $request = $this->createStub(ServerRequestInterface::class);
         $request->method('getBody')->willReturn($stream);
 
         return RequestBody::from($request);

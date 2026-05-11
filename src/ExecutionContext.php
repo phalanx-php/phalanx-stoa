@@ -4,7 +4,8 @@ declare(strict_types=1);
 
 namespace Phalanx\Stoa;
 
-use Phalanx\ExecutionScope;
+use Phalanx\Scope\ExecutionScope;
+use Phalanx\Stoa\Runtime\StoaScopeKey;
 use Phalanx\Support\ExecutionScopeDelegate;
 use Psr\Http\Message\ServerRequestInterface;
 
@@ -13,6 +14,18 @@ class ExecutionContext implements RequestScope
     use ExecutionScopeDelegate;
 
     private ?RequestBody $requestBody = null;
+
+    public string $resourceId {
+        get {
+            $id = $this->attribute(StoaScopeKey::ResourceId->value);
+
+            if (!is_string($id) || $id === '') {
+                throw MissingRequestResource::forScopeKey(StoaScopeKey::ResourceId->value);
+            }
+
+            return $id;
+        }
+    }
 
     public ServerRequestInterface $request {
         get => $this->serverRequest;
@@ -35,11 +48,11 @@ class ExecutionContext implements RequestScope
     }
 
     public function __construct(
-        private readonly ExecutionScope $inner,
-        private readonly ServerRequestInterface $serverRequest,
-        private readonly RouteParams $routeParams,
-        private readonly QueryParams $queryParams,
-        private readonly RouteConfig $routeConfig,
+        private(set) ExecutionScope $inner,
+        private(set) ServerRequestInterface $serverRequest,
+        private(set) RouteParams $routeParams,
+        private(set) QueryParams $queryParams,
+        private(set) RouteConfig $routeConfig,
     ) {
     }
 
@@ -61,6 +74,11 @@ class ExecutionContext implements RequestScope
     public function isJson(): bool
     {
         return str_contains($this->header('Content-Type'), 'application/json');
+    }
+
+    public function acceptsHtml(): bool
+    {
+        return str_contains($this->header('Accept'), 'text/html');
     }
 
     public function bearerToken(): ?string

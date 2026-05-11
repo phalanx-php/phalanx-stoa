@@ -26,16 +26,6 @@ final class RouteContractTest extends TestCase
 {
     private Application $app;
 
-    protected function setUp(): void
-    {
-        $this->app = Application::starting()->compile();
-    }
-
-    protected function tearDown(): void
-    {
-        $this->app->shutdown();
-    }
-
     #[Test]
     public function post_route_hydrates_input_from_body(): void
     {
@@ -206,6 +196,16 @@ final class RouteContractTest extends TestCase
         $this->assertInstanceOf(NoContent::class, $result);
     }
 
+    protected function setUp(): void
+    {
+        $this->app = Application::starting()->compile();
+    }
+
+    protected function tearDown(): void
+    {
+        $this->app->shutdown();
+    }
+
     /**
      * @param array<string, mixed> $json
      * @param array<string, string> $query
@@ -216,15 +216,15 @@ final class RouteContractTest extends TestCase
         array $json = [],
         array $query = [],
     ): ServerRequestInterface {
-        $uri = $this->createMock(UriInterface::class);
+        $uri = $this->createStub(UriInterface::class);
         $uri->method('getPath')->willReturn($path);
 
         $body = json_encode($json, JSON_THROW_ON_ERROR);
 
-        $stream = $this->createMock(StreamInterface::class);
+        $stream = $this->createStub(StreamInterface::class);
         $stream->method('__toString')->willReturn($body);
 
-        $request = $this->createMock(ServerRequestInterface::class);
+        $request = $this->createStub(ServerRequestInterface::class);
         $request->method('getMethod')->willReturn($method);
         $request->method('getUri')->willReturn($uri);
         $request->method('getQueryParams')->willReturn($query);
